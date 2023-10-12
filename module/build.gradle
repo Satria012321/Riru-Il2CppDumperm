@@ -1,115 +1,107 @@
+import org.apache.tools.ant.filters.FixCrLfFilter
+
+import java.nio.file.Paths
+import java.nio.file.Files
+
 apply plugin: 'com.android.library'
 apply from: file(rootProject.file('module.gradle'))
 
 android {
     compileSdkVersion rootProject.ext.targetSdkVersion
+    ndkVersion '25.2.9519653'
     defaultConfig {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         externalNativeBuild {
             cmake {
-                arguments "-DMODULE_NAME:STRING=riru_$moduleId"
+                arguments "-DMODULE_NAME:STRING=$moduleLibraryName"
             }
         }
+    }
+    buildFeatures {
+        prefab true
     }
     externalNativeBuild {
         cmake {
             path "src/main/cpp/CMakeLists.txt"
-            version "3.10.2"
+            version "3.22.1"
         }
     }
 }
 
-def outDir = file("$rootDir/out")
-def magiskDir = file("$outDir/magisk_module")
-def zipName = "magisk-${magiskModuleProp['id'].replace('_', '-')}-${magiskModuleProp['version']}.zip"
-def riruDir = "$magiskDir/riru"
-
-import java.nio.file.Files
-import java.security.MessageDigest
-
-static def calcSha256(file) {
-    def md = MessageDigest.getInstance("SHA-256")
-    file.eachByte 4096, { bytes, size ->
-        md.update(bytes, 0, size);
-    }
-    return md.digest().encodeHex()
+repositories {
+    mavenLocal()
 }
 
-static def renameOrFail(File from, File to) {
-    if (!from.renameTo(to)) {
-        throw new IOException("Unable reanme file $from to $to")
-    }
-}
+afterEvaluate {
+    android.libraryVariants.forEach { variant ->
+        def variantCapped = variant.name.capitalize()
+        def variantLowered = variant.name.toLowerCase()
 
-import org.apache.tools.ant.filters.FixCrLfFilter
+        def zipName = "${magiskModuleId.replace('_', '-')}-${moduleVersion}-${variantLowered}.zip"
+        def magiskDir = file("$outDir/magisk_module_$variantLowered")
 
-android.libraryVariants.all { variant ->
-    def task = variant.assembleProvider.get()
-    task.doLast {
-        // clear
-        delete { delete magiskDir }
+        task("prepareMagiskFiles${variantCapped}", type: Sync) {
+            dependsOn("assemble$variantCapped")
 
-        // copy from template
-        copy {
-            from "$rootDir/template/magisk_module"
-            into magiskDir.path
-            exclude 'riru.sh'
-        }
-        // copy riru.sh
-        copy {
-            from "$rootDir/template/magisk_module"
-            into magiskDir.path
-            include 'riru.sh'
-            filter { line ->
-                line.replaceAll('%%%RIRU_MODULE_ID%%%', moduleId)
-                        .replaceAll('%%%RIRU_MIN_API_VERSION%%%', riruApiVersion.toString())
-                        .replaceAll('%%%RIRU_MIN_VERSION_NAME%%%', riruMinVersionName)
+            def templatePath = "$rootDir/template/magisk_module"
+
+            into magiskDir
+            from(templatePath) {
+                exclude 'module.prop'
             }
-            filter(FixCrLfFilter.class,
-                    eol: FixCrLfFilter.CrLf.newInstance("lf"))
+            from(templatePath) {
+                include 'module.prop'
+                expand([
+                        id         : magiskModuleId,
+                        name       : moduleName,
+                        version    : moduleVersion,
+                        versionCode: moduleVersionCode.toString(),
+                        author     : moduleAuthor,
+                        description: moduleDescription,
+                ])
+                filter(FixCrLfFilter.class,
+                        eol: FixCrLfFilter.CrLf.newInstance("lf"))
+            }
+            from("$buildDir/intermediates/stripped_native_libs/$variantLowered/out/lib") {
+                into 'lib'
+            }
+            doLast {
+                file("$magiskDir/zygisk").mkdir()
+                fileTree("$magiskDir/lib").visit { f ->
+                    if (!f.directory) return
+                    def srcPath = Paths.get("${f.file.absolutePath}/lib${moduleLibraryName}.so")
+                    def dstPath = Paths.get("$magiskDir/zygisk/${f.path}.so")
+                    Files.move(srcPath, dstPath)
+                }
+                new File("$magiskDir/lib").deleteDir()
+            }
         }
-        // copy .git files manually since gradle exclude it by default
-        Files.copy(file("$rootDir/template/magisk_module/.gitattributes").toPath(), file("${magiskDir.path}/.gitattributes").toPath())
 
-        // generate module.prop
-        def modulePropText = ""
-        magiskModuleProp.each { k, v -> modulePropText += "$k=$v\n" }
-        modulePropText = modulePropText.trim()
-        file("$magiskDir/module.prop").text = modulePropText
-
-        // generate module.prop for Riru
-        def riruModulePropText = ""
-        moduleProp.each { k, v -> riruModulePropText += "$k=$v\n" }
-        riruModulePropText = riruModulePropText.trim()
-        file(riruDir).mkdirs()
-
-        // module.prop.new will be renamed to module.prop in post-fs-data.sh
-        file("$riruDir/module.prop.new").text = riruModulePropText
-
-        // copy native files
-        def nativeOutDir = file("build/intermediates/cmake/$variant.name/obj")
-
-        file("$magiskDir/system").mkdirs()
-        file("$magiskDir/system_x86").mkdirs()
-        renameOrFail(file("$nativeOutDir/arm64-v8a"), file("$magiskDir/system/lib64"))
-        renameOrFail(file("$nativeOutDir/armeabi-v7a"), file("$magiskDir/system/lib"))
-        renameOrFail(file("$nativeOutDir/x86_64"), file("$magiskDir/system_x86/lib64"))
-        renameOrFail(file("$nativeOutDir/x86"), file("$magiskDir/system_x86/lib"))
-
-        // generate sha1sum
-        fileTree("$magiskDir").matching {
-            exclude "README.md", "META-INF"
-        }.visit { f ->
-            if (f.directory) return
-            file(f.file.path + ".sha256sum").text = calcSha256(f.file)
+        task("zip${variantCapped}", type: Zip) {
+            dependsOn("prepareMagiskFiles${variantCapped}")
+            from magiskDir
+            archiveFileName.set(zipName)
+            destinationDirectory.set(outDir)
         }
+
+        task("push${variantCapped}", type: Exec) {
+            dependsOn("zip${variantCapped}")
+            workingDir outDir
+            commandLine android.adbExecutable, "push", zipName, "/data/local/tmp/"
+        }
+
+        task("flash${variantCapped}", type: Exec) {
+            dependsOn("push${variantCapped}")
+            commandLine android.adbExecutable, "shell", "su", "-c",
+                    "magisk --install-module /data/local/tmp/${zipName}"
+        }
+
+        task("flashAndReboot${variantCapped}", type: Exec) {
+            dependsOn("flash${variantCapped}")
+            commandLine android.adbExecutable, "shell", "reboot"
+        }
+
+        variant.assembleProvider.get().finalizedBy("zip${variantCapped}")
     }
-    task.finalizedBy zipMagiskMoudle
-}
-
-task zipMagiskMoudle(type: Zip) {
-    from magiskDir
-    archiveName zipName
-    destinationDir outDir
 }

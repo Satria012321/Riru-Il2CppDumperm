@@ -1,79 +1,80 @@
-#include <jni.h>
-#include <sys/types.h>
-#include <pthread.h>
 #include <cstring>
-#include "hook.h"
+#include <thread>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <cinttypes>
+#include "hack.h"
+#include "zygisk.hpp"
+#include "game.h"
+#include "log.h"
 
-// You can remove functions you don't need
+using zygisk::Api;
+using zygisk::AppSpecializeArgs;
+using zygisk::ServerSpecializeArgs;
 
-extern "C" {
-#define EXPORT __attribute__((visibility("default"))) __attribute__((used))
-EXPORT void nativeForkAndSpecializePre(
-        JNIEnv *env, jclass clazz, jint *_uid, jint *gid, jintArray *gids, jint *runtimeFlags,
-        jobjectArray *rlimits, jint *mountExternal, jstring *seInfo, jstring *niceName,
-        jintArray *fdsToClose, jintArray *fdsToIgnore, jboolean *is_child_zygote,
-        jstring *instructionSet, jstring *appDataDir, jboolean *isTopApp,
-        jobjectArray *pkgDataInfoList,
-        jobjectArray *whitelistedDataInfoList, jboolean *bindMountAppDataDirs,
-        jboolean *bindMountAppStorageDirs) {
-    enable_hack = isGame(env, *appDataDir);
-}
+class MyModule : public zygisk::ModuleBase {
+public:
+    void onLoad(Api *api, JNIEnv *env) override {
+        this->api = api;
+        this->env = env;
+    }
 
-EXPORT int nativeForkAndSpecializePost(JNIEnv *env, jclass clazz, jint res) {
-    if (res == 0) {
-        // in app process
+    void preAppSpecialize(AppSpecializeArgs *args) override {
+        auto package_name = env->GetStringUTFChars(args->nice_name, nullptr);
+        auto app_data_dir = env->GetStringUTFChars(args->app_data_dir, nullptr);
+        preSpecialize(package_name, app_data_dir);
+        env->ReleaseStringUTFChars(args->nice_name, package_name);
+        env->ReleaseStringUTFChars(args->app_data_dir, app_data_dir);
+    }
+
+    void postAppSpecialize(const AppSpecializeArgs *) override {
         if (enable_hack) {
-            int ret;
-            pthread_t ntid;
-            if ((ret = pthread_create(&ntid, NULL, hack_thread, NULL))) {
-                LOGE("can't create thread: %s\n", strerror(ret));
-            }
+            std::thread hack_thread(hack_prepare, game_data_dir, data, length);
+            hack_thread.detach();
         }
-    } else {
-        // in zygote process, res is child pid
-        // don't print log here, see https://github.com/RikkaApps/Riru/blob/77adfd6a4a6a81bfd20569c910bc4854f2f84f5e/riru-core/jni/main/jni_native_method.cpp#L55-L66
     }
-    return 0;
-}
 
-EXPORT __attribute__((visibility("default"))) void specializeAppProcessPre(
-        JNIEnv *env, jclass clazz, jint *_uid, jint *gid, jintArray *gids, jint *runtimeFlags,
-        jobjectArray *rlimits, jint *mountExternal, jstring *seInfo, jstring *niceName,
-        jboolean *startChildZygote, jstring *instructionSet, jstring *appDataDir,
-        jboolean *isTopApp, jobjectArray *pkgDataInfoList, jobjectArray *whitelistedDataInfoList,
-        jboolean *bindMountAppDataDirs, jboolean *bindMountAppStorageDirs) {
-    // added from Android 10, but disabled at least in Google Pixel devices
-}
+private:
+    Api *api;
+    JNIEnv *env;
+    bool enable_hack;
+    char *game_data_dir;
+    void *data;
+    size_t length;
 
-EXPORT __attribute__((visibility("default"))) int specializeAppProcessPost(
-        JNIEnv *env, jclass clazz) {
-    // added from Android 10, but disabled at least in Google Pixel devices
-    return 0;
-}
+    void preSpecialize(const char *package_name, const char *app_data_dir) {
+        if (strcmp(package_name, GamePackageName) == 0) {
+            LOGI("detect game: %s", package_name);
+            enable_hack = true;
+            game_data_dir = new char[strlen(app_data_dir) + 1];
+            strcpy(game_data_dir, app_data_dir);
 
-EXPORT void nativeForkSystemServerPre(
-        JNIEnv *env, jclass clazz, uid_t *uid, gid_t *gid, jintArray *gids, jint *runtimeFlags,
-        jobjectArray *rlimits, jlong *permittedCapabilities, jlong *effectiveCapabilities) {
-
-}
-
-EXPORT int nativeForkSystemServerPost(JNIEnv *env, jclass clazz, jint res) {
-    if (res == 0) {
-        // in system server process
-    } else {
-        // in zygote process, res is child pid
-        // don't print log here, see https://github.com/RikkaApps/Riru/blob/77adfd6a4a6a81bfd20569c910bc4854f2f84f5e/riru-core/jni/main/jni_native_method.cpp#L55-L66
+#if defined(__i386__)
+            auto path = "zygisk/armeabi-v7a.so";
+#endif
+#if defined(__x86_64__)
+            auto path = "zygisk/arm64-v8a.so";
+#endif
+#if defined(__i386__) || defined(__x86_64__)
+            int dirfd = api->getModuleDir();
+            int fd = openat(dirfd, path, O_RDONLY);
+            if (fd != -1) {
+                struct stat sb{};
+                fstat(fd, &sb);
+                length = sb.st_size;
+                data = mmap(nullptr, length, PROT_READ, MAP_PRIVATE, fd, 0);
+                close(fd);
+            } else {
+                LOGW("Unable to open arm file");
+            }
+#endif
+        } else {
+            api->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY);
+        }
     }
-    return 0;
-}
+};
 
-EXPORT int shouldSkipUid(int uid) {
-    // by default, Riru only call module functions in "normal app processes" (10000 <= uid % 100000 <= 19999)
-    // false = don't skip
-    return false;
-}
-
-EXPORT void onModuleLoaded() {
-    // called when the shared library of Riru core is loaded
-}
-}
+REGISTER_ZYGISK_MODULE(MyModule)

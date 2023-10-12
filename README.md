@@ -1,18 +1,21 @@
-# Riru-Il2CppDumper
-Riru版Il2CppDumper，在游戏运行时dump数据，用于绕过保护，加密以及混淆。
+# Zygisk-Il2CppDumper
+Il2CppDumper with Zygisk, dump il2cpp data at runtime, can bypass protection, encryption and obfuscation.
 
-## 如何食用
-1. 安装[Magisk](https://github.com/topjohnwu/Magisk)和[Riru](https://github.com/RikkaApps/Riru)
-2. 下载源码
-3. 编辑`game.h`, 修改游戏包名`GamePackageName`和Unity版本`UnityVersion`，`UnityVersion`的值请看文件内注释
-4. 使用Android Studio运行gradle任务`:module:assembleRelease`编译
-5. 在Magisk里安装模块
-6. 启动游戏，会在`/data/data/GamePackageName/files/`目录下生成`dump.cs`
+中文说明请戳[这里](README.zh-CN.md)
 
-## TODO
-- [x] 低版本使用反射进行dump
-- [x] 高版本使用`il2cpp_image_get_class`进行dump
-- [ ] 完善dump.cs输出
-- [ ] 泛型相关输出
-- [ ] 生成IDA脚本
-- [ ] 生成头文件
+## How to use
+1. Install [Magisk](https://github.com/topjohnwu/Magisk) v24 or later and enable Zygisk
+2. Build module
+   - GitHub Actions
+      1. Fork this repo
+      2. Go to the **Actions** tab in your forked repo
+      3. In the left sidebar, click the **Build** workflow.
+      4. Above the list of workflow runs, select **Run workflow**
+      5. Input the game package name and click **Run workflow**
+      6. Wait for the action to complete and download the artifact
+   - Android Studio
+      1. Download the source code
+      2. Edit `game.h`, modify `GamePackageName` to the game package name
+      3. Use Android Studio to run the gradle task `:module:assembleRelease` to compile, the zip package will be generated in the `out` folder
+3. Install module in Magisk
+4. Start the game, `dump.cs` will be generated in the `/data/data/GamePackageName/files/` directory
